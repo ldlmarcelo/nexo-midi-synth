@@ -7,7 +7,7 @@ que emite señales Qt para actualizar la GUI sin bloqueos.
 Incluye:
 - Detección soberana de SoundFonts (soporta PyInstaller frozen mode)
 - Transformación de curva de velocity (Soft/Linear/Hard)
-- Controles de Reverb y Chorus nativos de FluidSynth
+- Controles de Reverb y Chorus nativos de FluidSynth (con CC 91 y CC 93 en canal MIDI)
 - Transposición por semitonos y octavas
 - Función de Pánico (All Notes Off / Reset)
 - Favoritos / Presets persistentes
@@ -22,10 +22,8 @@ from PySide6.QtCore import QObject, Signal
 
 # Determinación robusta de la carpeta raíz de ejecución (compatible con PyInstaller .exe)
 if getattr(sys, 'frozen', False):
-    # Modo empaquetado (.exe de PyInstaller)
     CARPETA_RAIZ = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    # Modo desarrollo (Python script)
     CARPETA_RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Agregar directorio de DLLs si estamos en Windows
@@ -108,8 +106,8 @@ class MidiEngine(QObject):
         self._current_instrument = config.get("instrument", 0)
         self._volume = config.get("volume", 100)
         self._velocity_curve = config.get("velocity_curve", 1.0)
-        self._reverb_level = config.get("reverb_level", 0.3)  # 0.0 a 1.0
-        self._chorus_level = config.get("chorus_level", 0.0)  # 0.0 a 1.0
+        self._reverb_level = config.get("reverb_level", 0.4)  # 0.0 a 1.0
+        self._chorus_level = config.get("chorus_level", 0.5)  # 0.0 a 1.0
         self._transpose = config.get("transpose", 0)           # -12 a +12 semitonos
         self._octave = config.get("octave", 0)                 # -3 a +3 octavas
         self._favorites = config.get("favorites", list(DEFAULT_FAVORITES))
@@ -127,7 +125,6 @@ class MidiEngine(QObject):
         dirs = [CARPETA_RAIZ, os.getcwd()]
         if hasattr(sys, '_MEIPASS'):
             dirs.append(getattr(sys, '_MEIPASS'))
-        # Eliminar duplicados manteniendo orden
         seen = set()
         unique_dirs = []
         for d in dirs:
@@ -229,6 +226,9 @@ class MidiEngine(QObject):
         self._current_instrument = program
         if self._synth and self._sfid is not None:
             self._synth.program_select(0, self._sfid, 0, program)
+            # Reaplicar ruteo de efectos al cambiar de programa
+            self._apply_reverb()
+            self._apply_chorus()
         self.instrument_changed.emit(program)
         self._persist_config()
 
@@ -278,11 +278,16 @@ class MidiEngine(QObject):
         if not self._synth:
             return
         try:
-            roomsize = 0.6
-            damping = 0.4
+            # Configurar DSP Reverb
+            roomsize = 0.7
+            damping = 0.3
             width = 1.0
             self._synth.set_reverb(roomsize, damping, width, self._reverb_level)
             self._synth.reverb_on(1 if self._reverb_level > 0 else 0)
+            
+            # Relevante: Enviar MIDI CC 91 (Reverb Send Level) a canal 0
+            reverb_cc_val = int(self._reverb_level * 127)
+            self._synth.cc(0, 91, reverb_cc_val)
         except Exception:
             pass
 
@@ -300,13 +305,18 @@ class MidiEngine(QObject):
         if not self._synth:
             return
         try:
-            nr = 3
-            scaled_level = self._chorus_level * 5.0
-            speed = 0.3
-            depth = 8.0
-            chorus_type = 0
+            # Configurar DSP Chorus (Modulación bien notoria)
+            nr = 4                  # Cantidad de voces
+            scaled_level = self._chorus_level * 10.0  # Nivel de ganancia Chorus
+            speed = 1.5             # Velocidad de modulación Hz
+            depth = 12.0            # Profundidad de desacople ms
+            chorus_type = 0         # Onda senoidal
             self._synth.set_chorus(nr, scaled_level, speed, depth, chorus_type)
             self._synth.chorus_on(1 if self._chorus_level > 0 else 0)
+
+            # Relevante: Enviar MIDI CC 93 (Chorus Send Level) a canal 0
+            chorus_cc_val = int(self._chorus_level * 127)
+            self._synth.cc(0, 93, chorus_cc_val)
         except Exception:
             pass
 
@@ -395,6 +405,8 @@ class MidiEngine(QObject):
             program = message[1]
             self._current_instrument = program
             self._synth.program_change(0, program)
+            self._apply_reverb()
+            self._apply_chorus()
             self.instrument_changed.emit(program)
             self._persist_config()
 
