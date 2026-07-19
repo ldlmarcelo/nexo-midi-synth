@@ -5,6 +5,7 @@ Encapsula la captura MIDI (rtmidi) y la síntesis (FluidSynth) en una clase
 que emite señales Qt para actualizar la GUI sin bloqueos.
 
 Incluye:
+- Detección soberana de SoundFonts (soporta PyInstaller frozen mode)
 - Transformación de curva de velocity (Soft/Linear/Hard)
 - Controles de Reverb y Chorus nativos de FluidSynth
 - Transposición por semitonos y octavas
@@ -19,12 +20,22 @@ import json
 
 from PySide6.QtCore import QObject, Signal
 
-CARPETA_SCRIPT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Determinación robusta de la carpeta raíz de ejecución (compatible con PyInstaller .exe)
+if getattr(sys, 'frozen', False):
+    # Modo empaquetado (.exe de PyInstaller)
+    CARPETA_RAIZ = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    # Modo desarrollo (Python script)
+    CARPETA_RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Agregar directorio de DLLs si estamos en Windows
 if hasattr(os, "add_dll_directory"):
-    try:
-        os.add_dll_directory(CARPETA_SCRIPT)
-    except (FileNotFoundError, OSError):
-        pass
+    for dll_dir in [CARPETA_RAIZ, getattr(sys, '_MEIPASS', '')]:
+        if dll_dir and os.path.exists(dll_dir):
+            try:
+                os.add_dll_directory(dll_dir)
+            except (FileNotFoundError, OSError):
+                pass
 
 try:
     import rtmidi
@@ -42,7 +53,7 @@ PROGRAM_CHANGE = 0xC0
 PITCH_BEND = 0xE0
 
 # Archivo de configuración persistente
-CONFIG_FILE = os.path.join(CARPETA_SCRIPT, "config.json")
+CONFIG_FILE = os.path.join(CARPETA_RAIZ, "config.json")
 
 DEFAULT_FAVORITES = [0, 4, 19, 48, 88, 56]  # Piano, EP, Organ, Ensemble, Pad, Trumpet
 
@@ -111,10 +122,36 @@ class MidiEngine(QObject):
 
     # ── SoundFonts ─────────────────────────────────────────────────
 
+    def _get_search_directories(self) -> list[str]:
+        """Devuelve todas las rutas donde buscar archivos .sf2."""
+        dirs = [CARPETA_RAIZ, os.getcwd()]
+        if hasattr(sys, '_MEIPASS'):
+            dirs.append(getattr(sys, '_MEIPASS'))
+        # Eliminar duplicados manteniendo orden
+        seen = set()
+        unique_dirs = []
+        for d in dirs:
+            if d and d not in seen and os.path.exists(d):
+                seen.add(d)
+                unique_dirs.append(d)
+        return unique_dirs
+
     def get_available_soundfonts(self) -> list[str]:
-        """Busca archivos .sf2 en la carpeta del proyecto."""
-        pattern = os.path.join(CARPETA_SCRIPT, "*.sf2")
-        return [os.path.basename(f) for f in glob.glob(pattern)]
+        """Busca archivos .sf2 en la carpeta del ejecutable y working directory."""
+        sf_files = set()
+        for d in self._get_search_directories():
+            pattern = os.path.join(d, "*.sf2")
+            for f in glob.glob(pattern):
+                sf_files.add(os.path.basename(f))
+        return sorted(list(sf_files))
+
+    def _resolve_soundfont_path(self, soundfont_name: str) -> str:
+        """Encuentra la ruta completa para un nombre de archivo .sf2."""
+        for d in self._get_search_directories():
+            candidate = os.path.join(d, soundfont_name)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(CARPETA_RAIZ, soundfont_name)
 
     # ── Conexión ───────────────────────────────────────────────────
 
@@ -135,8 +172,8 @@ class MidiEngine(QObject):
         self._synth = fluidsynth.Synth()
         self._synth.start(driver="dsound")
 
-        # Cargar SoundFont
-        sf_path = os.path.join(CARPETA_SCRIPT, soundfont_name)
+        # Resolver ruta completa del SoundFont
+        sf_path = self._resolve_soundfont_path(soundfont_name)
         try:
             self._sfid = self._synth.sfload(sf_path)
         except Exception:
@@ -241,7 +278,6 @@ class MidiEngine(QObject):
         if not self._synth:
             return
         try:
-            # FluidSynth: roomsize=0.6, damping=0.4, width=1.0, level=0.0..1.0
             roomsize = 0.6
             damping = 0.4
             width = 1.0
@@ -264,7 +300,6 @@ class MidiEngine(QObject):
         if not self._synth:
             return
         try:
-            # FluidSynth: nr=3, level=0.0..10.0, speed=0.3, depth=8.0, type=0
             nr = 3
             scaled_level = self._chorus_level * 5.0
             speed = 0.3
