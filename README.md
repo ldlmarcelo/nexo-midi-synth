@@ -68,12 +68,16 @@ Los 128 instrumentos del estándar General MIDI están disponibles. Algunos dest
 | 56 | Trumpet |
 | 73 | Flute |
 
-## Roadmap
+## Roadmap & Futuras Nociones
 
-- [ ] Persistencia de instrumento seleccionado entre sesiones
-- [ ] Curva de velocity ajustable por software (compensar limitaciones del Carbon 49)
-- [ ] Soporte para múltiples SoundFonts intercambiables
-- [ ] Interfaz gráfica (GUI)
+- [x] Persistencia de instrumento y controles entre sesiones (`config.json`)
+- [x] Curva de velocity ajustable por software (Soft / Linear / Hard)
+- [x] Ruteo de efectos nativos de FluidSynth (`Reverb` y `Chorus` vía `CC 91` y `CC 93`)
+- [x] Transposición por semitonos (-12 a +12) y octavas (-3 a +3)
+- [x] Interfaz gráfica GUI (PySide6 / Dark DAW Style)
+- [x] Script de empaquetado autónomo para Windows (`build_exe.py` + PyInstaller)
+
+> 📌 Para consultar el roadmap completo de arquitectura avanzada (presets de sala, delay, arpegiador, layering y grabación), ver `ROADMAP.md`.
 
 ## Origen
 
