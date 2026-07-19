@@ -1,16 +1,16 @@
 """
 Ventana principal de NEXO MIDI Synth.
-Layout DAW-style con paneles de conexión, instrumentos, controles y actividad.
+Layout DAW-style con paneles de conexión, instrumentos (con presets), controles (volumen, vel. curve, reverb, chorus, transposición), pánico y actividad.
 """
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QComboBox, QListWidget, QListWidgetItem,
     QSlider, QLabel, QPushButton, QProgressBar,
-    QStatusBar, QFrame, QSizePolicy, QFileDialog
+    QStatusBar, QFrame, QSizePolicy, QMenu
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QAction
 
 from core.engine import MidiEngine
 from core.instruments import (
@@ -25,8 +25,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("♪ NEXO MIDI Synth")
-        self.setMinimumSize(480, 700)
-        self.resize(520, 760)
+        self.setMinimumSize(500, 780)
+        self.resize(540, 840)
 
         # Motor MIDI
         self.engine = MidiEngine(self)
@@ -41,11 +41,12 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._populate_devices()
 
-        # Restaurar estado del instrumento
+        # Restaurar estado inicial de interfaz y presets
         self._restore_instrument_selection()
+        self._update_favorites_buttons()
 
         # Status bar
-        self.statusBar().showMessage("NEXO MIDI Synth v1.0.0 — Listo")
+        self.statusBar().showMessage("NEXO MIDI Synth v1.1.0 — Listo")
 
     # ── Construcción de UI ─────────────────────────────────────────
 
@@ -56,16 +57,23 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(16, 12, 16, 12)
 
-        # Título
+        # Título + Botón de Pánico
         title_layout = QHBoxLayout()
         title = QLabel("♪ NEXO MIDI Synth")
         title.setObjectName("titleLabel")
         subtitle = QLabel("Módulo de sonido virtual GM")
         subtitle.setObjectName("subtitleLabel")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+
         title_layout.addWidget(title)
-        title_layout.addStretch()
         title_layout.addWidget(subtitle)
+        title_layout.addStretch()
+
+        self.panic_btn = QPushButton("🚨 PÁNICO")
+        self.panic_btn.setObjectName("disconnectBtn")
+        self.panic_btn.setToolTip("Corta todas las notas resonando inmediatamente (All Notes Off)")
+        title_layout.addWidget(self.panic_btn)
+
         layout.addLayout(title_layout)
 
         # Separador
@@ -77,10 +85,13 @@ class MainWindow(QMainWindow):
         # Panel de conexión
         layout.addWidget(self._build_connection_panel())
 
-        # Panel de instrumentos
+        # Panel de instrumentos (con favoritos)
         layout.addWidget(self._build_instrument_panel())
 
-        # Panel de controles
+        # Panel de pitch & transposición
+        layout.addWidget(self._build_transpose_panel())
+
+        # Panel de controles y efectos (Volumen, Vel Curve, Reverb, Chorus)
         layout.addWidget(self._build_controls_panel())
 
         # Panel de actividad
@@ -88,7 +99,6 @@ class MainWindow(QMainWindow):
 
     def _build_connection_panel(self) -> QGroupBox:
         group = QGroupBox("CONEXIÓN")
-
         layout = QVBoxLayout(group)
 
         # Fila: Dispositivo MIDI
@@ -133,9 +143,24 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_instrument_panel(self) -> QGroupBox:
-        group = QGroupBox("INSTRUMENTO")
-
+        group = QGroupBox("INSTRUMENTO & FAVORITOS")
         layout = QVBoxLayout(group)
+
+        # Fila: Presets / Favoritos Rápidos (P1 a P6)
+        fav_label = QLabel("Presets Favoritos (clic para cargar, clic derecho para guardar actual):")
+        fav_label.setObjectName("subtitleLabel")
+        layout.addWidget(fav_label)
+
+        fav_row = QHBoxLayout()
+        self.fav_buttons = []
+        for i in range(6):
+            btn = QPushButton(f"P{i+1}")
+            btn.setProperty("slot_idx", i)
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(self._on_fav_context_menu)
+            fav_row.addWidget(btn)
+            self.fav_buttons.append(btn)
+        layout.addLayout(fav_row)
 
         # Fila: Categoría
         cat_row = QHBoxLayout()
@@ -149,7 +174,7 @@ class MainWindow(QMainWindow):
 
         # Lista de instrumentos
         self.instrument_list = QListWidget()
-        self.instrument_list.setMinimumHeight(140)
+        self.instrument_list.setMinimumHeight(130)
         layout.addWidget(self.instrument_list)
 
         # Label del instrumento seleccionado
@@ -160,8 +185,53 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _build_transpose_panel(self) -> QGroupBox:
+        group = QGroupBox("TRANSPOSICIÓN Y OCTAVAS")
+        layout = QHBoxLayout(group)
+
+        # Octava (-3 a +3)
+        layout.addWidget(QLabel("Octava:"))
+        self.oct_down_btn = QPushButton("◀ -1")
+        self.oct_down_btn.setFixedWidth(50)
+        self.oct_val_label = QLabel("0")
+        self.oct_val_label.setObjectName("sliderValue")
+        self.oct_val_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.oct_up_btn = QPushButton("+1 ▶")
+        self.oct_up_btn.setFixedWidth(50)
+
+        layout.addWidget(self.oct_down_btn)
+        layout.addWidget(self.oct_val_label)
+        layout.addWidget(self.oct_up_btn)
+
+        # Separador vertical
+        vsep = QFrame()
+        vsep.setFrameShape(QFrame.Shape.VLine)
+        vsep.setStyleSheet("background-color: #2a2a4a;")
+        layout.addWidget(vsep)
+
+        # Transposición (-12 a +12 semitonos)
+        layout.addWidget(QLabel("Semitonos:"))
+        self.trans_down_btn = QPushButton("◀ -1")
+        self.trans_down_btn.setFixedWidth(50)
+        self.trans_val_label = QLabel("0")
+        self.trans_val_label.setObjectName("sliderValue")
+        self.trans_val_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.trans_up_btn = QPushButton("+1 ▶")
+        self.trans_up_btn.setFixedWidth(50)
+
+        layout.addWidget(self.trans_down_btn)
+        layout.addWidget(self.trans_val_label)
+        layout.addWidget(self.trans_up_btn)
+
+        # Botón de Reset Tuning
+        self.reset_pitch_btn = QPushButton("Reset 0")
+        self.reset_pitch_btn.setFixedWidth(64)
+        layout.addWidget(self.reset_pitch_btn)
+
+        return group
+
     def _build_controls_panel(self) -> QGroupBox:
-        group = QGroupBox("CONTROLES")
+        group = QGroupBox("CONTROLES Y EFECTOS")
         layout = QVBoxLayout(group)
 
         # Volumen
@@ -189,6 +259,30 @@ class MainWindow(QMainWindow):
         curve_row.addWidget(self.curve_value)
         layout.addLayout(curve_row)
 
+        # Reverb
+        rev_row = QHBoxLayout()
+        rev_row.addWidget(QLabel("Reverb"))
+        self.reverb_slider = QSlider(Qt.Orientation.Horizontal)
+        self.reverb_slider.setRange(0, 100)
+        self.reverb_slider.setValue(int(self.engine.reverb_level * 100))
+        rev_row.addWidget(self.reverb_slider)
+        self.reverb_value = QLabel(f"{int(self.engine.reverb_level * 100)}%")
+        self.reverb_value.setObjectName("sliderValue")
+        rev_row.addWidget(self.reverb_value)
+        layout.addLayout(rev_row)
+
+        # Chorus
+        cho_row = QHBoxLayout()
+        cho_row.addWidget(QLabel("Chorus"))
+        self.chorus_slider = QSlider(Qt.Orientation.Horizontal)
+        self.chorus_slider.setRange(0, 100)
+        self.chorus_slider.setValue(int(self.engine.chorus_level * 100))
+        cho_row.addWidget(self.chorus_slider)
+        self.chorus_value = QLabel(f"{int(self.engine.chorus_level * 100)}%")
+        self.chorus_value.setObjectName("sliderValue")
+        cho_row.addWidget(self.chorus_value)
+        layout.addLayout(cho_row)
+
         # Label descriptivo de la curva
         self.curve_desc = QLabel(self._curve_description(self.engine.velocity_curve))
         self.curve_desc.setObjectName("curveLabel")
@@ -201,7 +295,6 @@ class MainWindow(QMainWindow):
         group = QGroupBox("ACTIVIDAD")
         layout = QVBoxLayout(group)
 
-        # Fila: Nota + Velocity
         activity_row = QHBoxLayout()
 
         # Nota
@@ -248,23 +341,94 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         # Botones
+        self.panic_btn.clicked.connect(self.engine.panic)
         self.connect_btn.clicked.connect(self._on_connect)
         self.disconnect_btn.clicked.connect(self._on_disconnect)
         self.refresh_btn.clicked.connect(self._populate_devices)
+
+        # Presets Favoritos
+        for btn in self.fav_buttons:
+            btn.clicked.connect(self._on_fav_clicked)
 
         # Instrumentos
         self.category_combo.currentIndexChanged.connect(self._on_category_changed)
         self.instrument_list.currentRowChanged.connect(self._on_instrument_selected)
 
+        # Transposición
+        self.oct_down_btn.clicked.connect(lambda: self._adjust_octave(-1))
+        self.oct_up_btn.clicked.connect(lambda: self._adjust_octave(1))
+        self.trans_down_btn.clicked.connect(lambda: self._adjust_transpose(-1))
+        self.trans_up_btn.clicked.connect(lambda: self._adjust_transpose(1))
+        self.reset_pitch_btn.clicked.connect(self._reset_pitch)
+
         # Controles
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
         self.curve_slider.valueChanged.connect(self._on_curve_changed)
+        self.reverb_slider.valueChanged.connect(self._on_reverb_changed)
+        self.chorus_slider.valueChanged.connect(self._on_chorus_changed)
 
         # Engine
         self.engine.note_played.connect(self._on_note_played)
         self.engine.note_released.connect(self._on_note_released)
         self.engine.instrument_changed.connect(self._on_instrument_changed_external)
         self.engine.connection_changed.connect(self._on_connection_changed)
+        self.engine.favorites_changed.connect(self._update_favorites_buttons)
+
+    # ── Slots: Favoritos / Presets ─────────────────────────────────
+
+    def _update_favorites_buttons(self, favs=None):
+        favorites = favs if favs is not None else self.engine.favorites
+        for i, btn in enumerate(self.fav_buttons):
+            if i < len(favorites):
+                prog = favorites[i]
+                name = GM_INSTRUMENTS[prog]
+                # Mostrar código corto en el botón
+                short_name = f"P{i+1}: {name[:10]}..." if len(name) > 10 else f"P{i+1}: {name}"
+                btn.setText(short_name)
+                btn.setToolTip(f"[{prog}] {name}\nClic izquierdo: Seleccionar\nClic derecho: Reemplazar por instrumento actual")
+
+    def _on_fav_clicked(self):
+        btn = self.sender()
+        if not btn:
+            return
+        idx = btn.property("slot_idx")
+        favorites = self.engine.favorites
+        if 0 <= idx < len(favorites):
+            prog = favorites[idx]
+            self.engine.set_instrument(prog)
+            self._restore_instrument_selection()
+
+    def _on_fav_context_menu(self, pos):
+        btn = self.sender()
+        if not btn:
+            return
+        idx = btn.property("slot_idx")
+        current_prog = self.engine.current_instrument
+        current_name = GM_INSTRUMENTS[current_prog]
+
+        menu = QMenu(self)
+        save_action = QAction(f"Guardar [{current_prog}] {current_name} en P{idx+1}", self)
+        save_action.triggered.connect(lambda: self.engine.set_favorite(idx, current_prog))
+        menu.addAction(save_action)
+        menu.exec(btn.mapToGlobal(pos))
+
+    # ── Slots: Transposición ───────────────────────────────────────
+
+    def _adjust_octave(self, delta: int):
+        new_oct = max(-3, min(3, self.engine.octave + delta))
+        self.engine.set_octave(new_oct)
+        self.oct_val_label.setText(f"{new_oct:+d}" if new_oct != 0 else "0")
+
+    def _adjust_transpose(self, delta: int):
+        new_trans = max(-12, min(12, self.engine.transpose + delta))
+        self.engine.set_transpose(new_trans)
+        self.trans_val_label.setText(f"{new_trans:+d}" if new_trans != 0 else "0")
+
+    def _reset_pitch(self):
+        self.engine.set_octave(0)
+        self.engine.set_transpose(0)
+        self.oct_val_label.setText("0")
+        self.trans_val_label.setText("0")
 
     # ── Slots: Conexión ────────────────────────────────────────────
 
@@ -337,7 +501,6 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, prog)
             self.instrument_list.addItem(item)
 
-            # Marcar el instrumento activo
             if prog == self.engine.current_instrument:
                 self.instrument_list.setCurrentItem(item)
         self.instrument_list.blockSignals(False)
@@ -354,8 +517,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Instrumento: [{prog}] {GM_INSTRUMENTS[prog]}")
 
     def _on_instrument_changed_external(self, program: int):
-        """Cuando el instrumento cambia desde el teclado MIDI (Program Change)."""
-        # Actualizar categoría y selección
         for i, (_, start, end) in enumerate(GM_CATEGORIES):
             if start <= program <= end:
                 self.category_combo.blockSignals(True)
@@ -363,7 +524,6 @@ class MainWindow(QMainWindow):
                 self.category_combo.blockSignals(False)
                 self._on_category_changed(i)
 
-                # Seleccionar el instrumento en la lista
                 for row in range(self.instrument_list.count()):
                     item = self.instrument_list.item(row)
                     if item and item.data(Qt.ItemDataRole.UserRole) == program:
@@ -376,7 +536,6 @@ class MainWindow(QMainWindow):
         self.selected_label.setText(f"► [{program}] {GM_INSTRUMENTS[program]}")
 
     def _restore_instrument_selection(self):
-        """Restaura la selección visual del instrumento guardado."""
         prog = self.engine.current_instrument
         for i, (_, start, end) in enumerate(GM_CATEGORIES):
             if start <= prog <= end:
@@ -395,6 +554,16 @@ class MainWindow(QMainWindow):
         self.engine.set_velocity_curve(exponent)
         self.curve_value.setText(f"{exponent:.1f}")
         self.curve_desc.setText(self._curve_description(exponent))
+
+    def _on_reverb_changed(self, value: int):
+        level = value / 100.0
+        self.engine.set_reverb_level(level)
+        self.reverb_value.setText(f"{value}%")
+
+    def _on_chorus_changed(self, value: int):
+        level = value / 100.0
+        self.engine.set_chorus_level(level)
+        self.chorus_value.setText(f"{value}%")
 
     @staticmethod
     def _curve_description(exponent: float) -> str:
@@ -416,12 +585,10 @@ class MainWindow(QMainWindow):
         self.note_display.setText(name)
         self.velocity_bar.setValue(velocity)
         self.velocity_value.setText(str(velocity))
-
-        # Reiniciar timer de decay
         self._activity_timer.start(2000)
 
     def _on_note_released(self, note: int):
-        pass  # No limpiamos inmediatamente — el timer se encarga
+        pass
 
     def _clear_activity(self):
         self.note_display.setText("—")

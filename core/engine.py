@@ -4,8 +4,12 @@ Motor MIDI + FluidSynth para el módulo de sonido virtual.
 Encapsula la captura MIDI (rtmidi) y la síntesis (FluidSynth) en una clase
 que emite señales Qt para actualizar la GUI sin bloqueos.
 
-Incluye transformación de curva de velocity para compensar
-las limitaciones mecánicas de teclados económicos.
+Incluye:
+- Transformación de curva de velocity (Soft/Linear/Hard)
+- Controles de Reverb y Chorus nativos de FluidSynth
+- Transposición por semitonos y octavas
+- Función de Pánico (All Notes Off / Reset)
+- Favoritos / Presets persistentes
 """
 
 import os
@@ -40,6 +44,8 @@ PITCH_BEND = 0xE0
 # Archivo de configuración persistente
 CONFIG_FILE = os.path.join(CARPETA_SCRIPT, "config.json")
 
+DEFAULT_FAVORITES = [0, 4, 19, 48, 88, 56]  # Piano, EP, Organ, Ensemble, Pad, Trumpet
+
 
 def _load_config() -> dict:
     """Carga la configuración persistente desde config.json."""
@@ -66,16 +72,18 @@ class MidiEngine(QObject):
     Motor de captura MIDI y síntesis de audio.
 
     Señales emitidas (thread-safe vía Qt):
-        note_played(int, int)       - (nota MIDI, velocity ajustada)
+        note_played(int, int)       - (nota MIDI original, velocity ajustada)
         note_released(int)          - nota MIDI liberada
         instrument_changed(int)     - nuevo program number
         connection_changed(bool)    - estado de conexión MIDI
+        favorites_changed(list)     - lista actualizada de instrumentos favoritos
     """
 
     note_played = Signal(int, int)
     note_released = Signal(int)
     instrument_changed = Signal(int)
     connection_changed = Signal(bool)
+    favorites_changed = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,15 +91,17 @@ class MidiEngine(QObject):
         self._synth = None
         self._sfid = None
         self._connected = False
-        self._current_instrument = 0
-        self._volume = 100          # 0-127
-        self._velocity_curve = 1.0  # exponente: <1 = soft, 1 = lineal, >1 = hard
 
-        # Cargar configuración persistente
+        # Estado por defecto / persistente
         config = _load_config()
         self._current_instrument = config.get("instrument", 0)
         self._volume = config.get("volume", 100)
         self._velocity_curve = config.get("velocity_curve", 1.0)
+        self._reverb_level = config.get("reverb_level", 0.3)  # 0.0 a 1.0
+        self._chorus_level = config.get("chorus_level", 0.0)  # 0.0 a 1.0
+        self._transpose = config.get("transpose", 0)           # -12 a +12 semitonos
+        self._octave = config.get("octave", 0)                 # -3 a +3 octavas
+        self._favorites = config.get("favorites", list(DEFAULT_FAVORITES))
 
     # ── Dispositivos MIDI ──────────────────────────────────────────
 
@@ -136,9 +146,11 @@ class MidiEngine(QObject):
             self.connection_changed.emit(False)
             return False
 
-        # Configurar instrumento y volumen inicial
+        # Configurar estado inicial en el motor
         self._synth.program_select(0, self._sfid, 0, self._current_instrument)
         self._synth.cc(0, 7, self._volume)
+        self._apply_reverb()
+        self._apply_chorus()
 
         # Registrar callback MIDI
         self._midiin.set_callback(self._midi_callback)
@@ -167,7 +179,7 @@ class MidiEngine(QObject):
     def is_connected(self) -> bool:
         return self._connected
 
-    # ── Controles ──────────────────────────────────────────────────
+    # ── Controles de Instrumento ───────────────────────────────────
 
     @property
     def current_instrument(self) -> int:
@@ -182,6 +194,8 @@ class MidiEngine(QObject):
             self._synth.program_select(0, self._sfid, 0, program)
         self.instrument_changed.emit(program)
         self._persist_config()
+
+    # ── Controles de Volumen y Curva de Velocity ───────────────────
 
     @property
     def volume(self) -> int:
@@ -199,12 +213,7 @@ class MidiEngine(QObject):
         return self._velocity_curve
 
     def set_velocity_curve(self, exponent: float):
-        """
-        Ajusta la curva de velocity.
-        exponent < 1.0 → Soft (amplifica toques suaves)
-        exponent = 1.0 → Linear (sin cambio)
-        exponent > 1.0 → Hard (comprime toques suaves)
-        """
+        """Ajusta el exponente de la curva de velocity (0.1 a 3.0)."""
         self._velocity_curve = max(0.1, min(3.0, exponent))
         self._persist_config()
 
@@ -216,6 +225,104 @@ class MidiEngine(QObject):
         adjusted = normalized ** self._velocity_curve
         return max(1, min(127, int(adjusted * 127)))
 
+    # ── Efectos: Reverb y Chorus ────────────────────────────────────
+
+    @property
+    def reverb_level(self) -> float:
+        return self._reverb_level
+
+    def set_reverb_level(self, level: float):
+        """Ajusta el nivel de Reverb (0.0 a 1.0)."""
+        self._reverb_level = max(0.0, min(1.0, level))
+        self._apply_reverb()
+        self._persist_config()
+
+    def _apply_reverb(self):
+        if not self._synth:
+            return
+        try:
+            # FluidSynth: roomsize=0.6, damping=0.4, width=1.0, level=0.0..1.0
+            roomsize = 0.6
+            damping = 0.4
+            width = 1.0
+            self._synth.set_reverb(roomsize, damping, width, self._reverb_level)
+            self._synth.reverb_on(1 if self._reverb_level > 0 else 0)
+        except Exception:
+            pass
+
+    @property
+    def chorus_level(self) -> float:
+        return self._chorus_level
+
+    def set_chorus_level(self, level: float):
+        """Ajusta el nivel de Chorus (0.0 a 1.0)."""
+        self._chorus_level = max(0.0, min(1.0, level))
+        self._apply_chorus()
+        self._persist_config()
+
+    def _apply_chorus(self):
+        if not self._synth:
+            return
+        try:
+            # FluidSynth: nr=3, level=0.0..10.0, speed=0.3, depth=8.0, type=0
+            nr = 3
+            scaled_level = self._chorus_level * 5.0
+            speed = 0.3
+            depth = 8.0
+            chorus_type = 0
+            self._synth.set_chorus(nr, scaled_level, speed, depth, chorus_type)
+            self._synth.chorus_on(1 if self._chorus_level > 0 else 0)
+        except Exception:
+            pass
+
+    # ── Transposición y Octavas ─────────────────────────────────────
+
+    @property
+    def transpose(self) -> int:
+        return self._transpose
+
+    def set_transpose(self, semitones: int):
+        """Ajusta la transposición (-12 a +12 semitonos)."""
+        self.panic()
+        self._transpose = max(-12, min(12, semitones))
+        self._persist_config()
+
+    @property
+    def octave(self) -> int:
+        return self._octave
+
+    def set_octave(self, octs: int):
+        """Ajusta el desplazamiento de octava (-3 a +3)."""
+        self.panic()
+        self._octave = max(-3, min(3, octs))
+        self._persist_config()
+
+    # ── Botón de Pánico (All Notes Off) ─────────────────────────────
+
+    def panic(self):
+        """Corta todas las notas resonando inmediatamente."""
+        if self._synth:
+            for chan in range(16):
+                self._synth.cc(chan, 123, 0)  # All Notes Off
+                self._synth.cc(chan, 121, 0)  # Reset All Controllers
+            try:
+                self._synth.system_reset()
+            except Exception:
+                pass
+
+    # ── Favoritos / Presets ─────────────────────────────────────────
+
+    @property
+    def favorites(self) -> list[int]:
+        return self._favorites
+
+    def set_favorite(self, slot_index: int, program: int):
+        """Guarda un instrumento en un slot de favoritos (0-5)."""
+        if 0 <= slot_index < len(self._favorites) and 0 <= program <= 127:
+            self._favorites[slot_index] = program
+            self.favorites_changed.emit(list(self._favorites))
+            self._persist_config()
+
     # ── Callback MIDI (corre en thread de rtmidi) ─────────────────
 
     def _midi_callback(self, event, data=None):
@@ -226,19 +333,25 @@ class MidiEngine(QObject):
 
         status = message[0] & 0xF0
 
+        # Calcular notas transpuestas
+        shift = self._transpose + (self._octave * 12)
+
         if status == NOTE_ON and len(message) >= 3:
-            note, vel = message[1], message[2]
+            raw_note, vel = message[1], message[2]
+            target_note = max(0, min(127, raw_note + shift))
             if vel > 0:
                 adjusted_vel = self._apply_velocity_curve(vel)
-                self._synth.noteon(0, note, adjusted_vel)
-                self.note_played.emit(note, adjusted_vel)
+                self._synth.noteon(0, target_note, adjusted_vel)
+                self.note_played.emit(target_note, adjusted_vel)
             else:
-                self._synth.noteoff(0, note)
-                self.note_released.emit(note)
+                self._synth.noteoff(0, target_note)
+                self.note_released.emit(target_note)
 
         elif status == NOTE_OFF and len(message) >= 3:
-            self._synth.noteoff(0, message[1])
-            self.note_released.emit(message[1])
+            raw_note = message[1]
+            target_note = max(0, min(127, raw_note + shift))
+            self._synth.noteoff(0, target_note)
+            self.note_released.emit(target_note)
 
         elif status == CONTROL_CHANGE and len(message) >= 3:
             self._synth.cc(0, message[1], message[2])
@@ -262,6 +375,11 @@ class MidiEngine(QObject):
         config["instrument"] = self._current_instrument
         config["volume"] = self._volume
         config["velocity_curve"] = self._velocity_curve
+        config["reverb_level"] = self._reverb_level
+        config["chorus_level"] = self._chorus_level
+        config["transpose"] = self._transpose
+        config["octave"] = self._octave
+        config["favorites"] = self._favorites
         _save_config(config)
 
     # ── Cleanup ────────────────────────────────────────────────────
