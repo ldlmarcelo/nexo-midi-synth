@@ -1,0 +1,21 @@
+# SoundFonts (binarios pesados, no versionados)
+*.sf2
+
+# DLLs de FluidSynth (binarios nativos)
+*.dll
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
